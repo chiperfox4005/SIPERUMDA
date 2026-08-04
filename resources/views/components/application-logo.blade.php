@@ -1,0 +1,1 @@
+<img src="{{ asset('images/icon.png') }}" alt="Logo SIPERUMDA" {{ $attributes->merge(['class' => 'h-16 w-auto object-contain']) }}>

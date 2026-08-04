@@ -1,0 +1,21 @@
+{
+  "jenis": [
+    { "id": "informasi", "nama": "Informasi" },
+    { "id": "imbauan", "nama": "Imbauan" },
+    { "id": "maintenance", "nama": "Maintenance" },
+    { "id": "libur", "nama": "Libur" },
+    { "id": "pengingat", "nama": "Pengingat" },
+    { "id": "internal", "nama": "Internal" },
+    { "id": "eksternal", "nama": "Eksternal" },
+    { "id": "lainnya", "nama": "Lainnya" }
+  ],
+  "prioritas": [
+    { "id": "umum", "nama": "Umum", "warna": "secondary" },
+    { "id": "penting", "nama": "Penting", "warna": "warning" },
+    { "id": "mendesak", "nama": "Mendesak", "warna": "danger" }
+  ],
+  "status": [
+    { "id": "draft", "nama": "Draft", "warna": "secondary" },
+    { "id": "publish", "nama": "Publish", "warna": "success" }
+  ]
+}

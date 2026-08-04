@@ -1,0 +1,157 @@
+{
+  "templates": [
+    {
+      "id": "template_a",
+      "code": "A",
+      "name": "Undangan Rapat",
+      "icon": "bi-people",
+      "description": "Template standar undangan rapat resmi PDAM",
+      "requires_room": true,
+      "requires_letter": true,
+      "pdf_template": "agenda.templates.template_a",
+      "form_schema": {
+        "sections": [
+          {
+            "title": "Informasi Surat",
+            "fields": [
+              {
+                "name": "judul",
+                "label": "Judul Agenda",
+                "type": "text",
+                "required": true,
+                "placeholder": "Contoh: Rapat Koordinasi Mingguan Direksi"
+              },
+              {
+                "name": "hari",
+                "label": "Hari",
+                "type": "select",
+                "required": true,
+                "options": ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+              },
+              {
+                "name": "tanggal",
+                "label": "Tanggal",
+                "type": "date",
+                "required": true
+              },
+              {
+                "name": "jam_mulai",
+                "label": "Jam Mulai",
+                "type": "time",
+                "required": true
+              },
+              {
+                "name": "jam_selesai",
+                "label": "Jam Selesai",
+                "type": "time",
+                "required": false
+              },
+              {
+                "name": "tempat",
+                "label": "Tempat / Ruangan",
+                "type": "text",
+                "required": true,
+                "placeholder": "Contoh: Ruang Rapat OR Lt 1"
+              },
+              {
+                "name": "acara",
+                "label": "Acara",
+                "type": "textarea",
+                "required": true,
+                "rows": 3
+              },
+              {
+                "name": "pimpinan_rapat",
+                "label": "Pimpinan Rapat",
+                "type": "text",
+                "required": true,
+                "placeholder": "Contoh: Direktur Teknik"
+              }
+            ]
+          },
+          {
+            "title": "Peserta Undangan",
+            "fields": [
+              {
+                "name": "peserta",
+                "label": "Daftar Peserta",
+                "type": "repeater",
+                "required": true,
+                "item_schema": {
+                  "bagian_sub_bagian": {
+                    "label": "Bagian / Sub Bagian",
+                    "type": "select",
+                    "source": "bagians_with_sub",
+                    "required": true
+                  },
+                  "jumlah": {
+                    "label": "Jumlah Orang",
+                    "type": "number",
+                    "min": 1,
+                    "default": 1,
+                    "required": true
+                  },
+                  "keterangan": {
+                    "label": "Keterangan",
+                    "type": "text",
+                    "required": false
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "title": "Informasi Tambahan",
+            "fields": [
+              {
+                "name": "inisiator",
+                "label": "Inisiator",
+                "type": "text",
+                "required": false,
+                "placeholder": "Contoh: Bagian Perencanaan & Evaluasi"
+              },
+              {
+                "name": "notulen",
+                "label": "Notulen",
+                "type": "text",
+                "required": false
+              },
+              {
+                "name": "catatan",
+                "label": "Catatan",
+                "type": "repeater",
+                "required": false,
+                "item_schema": {
+                  "text": {
+                    "label": "Catatan",
+                    "type": "text",
+                    "required": true
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "title": "Peminjaman Ruangan",
+            "fields": [
+              {
+                "name": "membutuhkan_ruangan",
+                "label": "Membutuhkan Ruangan",
+                "type": "checkbox",
+                "default": false
+              },
+              {
+                "name": "ruangan_id",
+                "label": "Pilih Ruangan",
+                "type": "select",
+                "source": "ruangans",
+                "required_if": "membutuhkan_ruangan,true",
+                "conditional": true
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

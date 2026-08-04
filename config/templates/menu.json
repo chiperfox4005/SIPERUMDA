@@ -1,0 +1,58 @@
+{
+  "main_menu": [
+    {
+      "id": "dashboard",
+      "name": "Beranda",
+      "route": "dashboard",
+      "icon": "bi-grid"
+    },
+    {
+      "id": "agenda",
+      "name": "Agenda",
+      "route": "agenda.index",
+      "icon": "bi-calendar-event"
+    },
+    {
+      "id": "pengumuman",
+      "name": "Pengumuman",
+      "route": "pengumuman.index",
+      "icon": "bi-megaphone"
+    },
+    {
+      "id": "peminjaman",
+      "name": "Peminjaman Ruangan",
+      "route": "peminjaman-ruangan.index",
+      "icon": "bi-door-open"
+    }
+  ],
+  "role_menus": {
+    "admin": [
+      { "id": "admin_users", "name": "Manajemen Pengguna", "route": "admin.users", "icon": "bi-people" },
+      { "id": "admin_audit", "name": "Audit Log", "route": "admin.audit-logs", "icon": "bi-journal-text" },
+      { "id": "admin_backup", "name": "Backup & Restore", "route": "admin.backup.page", "icon": "bi-hdd" }
+    ],
+    "kepegawaian": [
+      { "id": "keg_bagian", "name": "Data Bagian", "route": "kepegawaian.bagian.index", "icon": "bi-building" },
+      { "id": "keg_sub", "name": "Data Sub Bagian", "route": "kepegawaian.sub-bagian.index", "icon": "bi-diagram-3" },
+      { "id": "keg_pengumuman", "name": "Pengumuman Internal", "route": "kepegawaian.pengumuman.index", "icon": "bi-megaphone" }
+    ],
+    "sekretariat": [
+      { "id": "sek_approval", "name": "Persetujuan", "route": "peminjaman-ruangan.approval", "icon": "bi-clipboard-check" },
+      { "id": "sek_ruangan", "name": "Data Master Ruangan", "route": "ruangan.index", "icon": "bi-houses" }
+    ]
+  },
+  "bottom_menu": [
+    {
+      "id": "notifikasi",
+      "name": "Notifikasi",
+      "route": "notifikasi",
+      "icon": "bi-bell"
+    },
+    {
+      "id": "profil",
+      "name": "Profil",
+      "route": "profile.edit",
+      "icon": "bi-person"
+    }
+  ]
+}
