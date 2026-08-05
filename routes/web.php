@@ -1,5 +1,4 @@
 <?php
-
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AgendaController;
 use App\Http\Controllers\AgendaDokumentasiController;
@@ -65,6 +64,7 @@ Route::middleware(['auth'])->group(function () {
     Route::delete('/profile', [ProfileController::class, 'destroy'])->name('profile.destroy');
 
     Route::resource('pengumuman', PengumumanController::class);
+    Route::patch('/pengumuman/{pengumuman}/update-status', [PengumumanController::class, 'updateStatus'])->name('pengumuman.update-status');
 
     // ==========================================
     // DOCUMENT TEMPLATE ENGINE (SURAT)
@@ -306,12 +306,12 @@ Route::middleware(['auth'])->group(function () {
         return response()->json($events);
     })->name('api.kalender-agenda');
 
+    // ✅ PERBAIKAN: API Kalender Pengumuman disesuaikan agar hanya mengambil status 'publish' (mencegah draft muncul di kalender publik) dan tetap mendukung filter target audience & addDay()
     Route::get('/api/kalender-pengumuman', function () {
         $user = auth()->user();
-        $events = [];
         $userBagianId = $user->bagian->id ?? null;
         $userSubBagianId = $user->subBagian->id ?? null;
-        
+
         $pengumumans = \App\Models\Pengumuman::where('status', 'publish')
             ->whereDate('tanggal_publish', '<=', now())
             ->where(function ($q) {
@@ -326,27 +326,41 @@ Route::middleware(['auth'])->group(function () {
                       if ($userSubBagianId) $subQ->orWhereJsonContains('target_ids->sub_bagians', (string)$userSubBagianId);
                   });
             })
-            ->get();
+            ->get()
+            ->map(function($p) {
+                $start = $p->tanggal_publish ?? $p->created_at;
+                if ($start instanceof \Carbon\Carbon) {
+                    $start = $start->format('Y-m-d');
+                } else {
+                    $start = \Carbon\Carbon::parse($start)->format('Y-m-d');
+                }
+                
+                // ✅ KUNCI: Tambah 1 hari ke tanggal selesai agar FullCalendar berhenti di tanggal yang benar
+                $endRaw = $p->tanggal_berakhir ?? $p->tanggal_publish ?? $p->created_at;
+                if ($endRaw instanceof \Carbon\Carbon) {
+                    $end = $endRaw->addDay()->format('Y-m-d');
+                } else {
+                    $end = \Carbon\Carbon::parse($endRaw)->addDay()->format('Y-m-d');
+                }
+                
+                return [
+                    'title' => '📢 ' . $p->judul,
+                    'start' => $start,
+                    'end'   => $end, // FullCalendar butuh ini +1 hari untuk allDay event
+                    'url'   => route('pengumuman.show', $p),
+                    'backgroundColor' => '#10b981',
+                    'borderColor' => '#059669',
+                    'textColor' => '#ffffff',
+                    'allDay' => true,
+                    'extendedProps' => [
+                        'kategori' => $p->kategori ?? $p->jenis ?? 'Umum',
+                        'status' => 'Pengumuman'
+                    ]
+                ];
+            });
 
-        foreach ($pengumumans as $pengumuman) {
-            $startDate = $pengumuman->tanggal_publish ? \Carbon\Carbon::parse($pengumuman->tanggal_publish)->format('Y-m-d') : \Carbon\Carbon::parse($pengumuman->created_at)->format('Y-m-d');
-            $endDate = $pengumuman->tanggal_berakhir ? \Carbon\Carbon::parse($pengumuman->tanggal_berakhir)->addDay()->format('Y-m-d') : $startDate;
-            
-            $events[] = [
-                'title' => '📢 ' . $pengumuman->judul,
-                'start' => $startDate,
-                'end' => $endDate,
-                'allDay' => true,
-                'backgroundColor' => '#10b981',
-                'borderColor' => '#10b981',
-                'url' => route('pengumuman.show', $pengumuman),
-                'extendedProps' => [
-                    'kategori' => $pengumuman->kategori ?? $pengumuman->jenis ?? 'Umum',
-                    'status' => 'Pengumuman'
-                ]
-            ];
-        }
-        
+        $events = $pengumumans->toArray();
+
         try {
             $response = \Illuminate\Support\Facades\Http::timeout(5)->withoutVerifying()
                 ->get("https://libur.deno.dev/api?year=" . now()->year);
@@ -366,7 +380,7 @@ Route::middleware(['auth'])->group(function () {
                 }
             }
         } catch (\Exception $e) {}
-        
+
         return response()->json($events);
     })->name('api.kalender-pengumuman');
 
@@ -417,7 +431,6 @@ Route::middleware(['auth'])->group(function () {
     // ROLE-SPECIFIC ROUTES
     // ==========================================
     Route::middleware(['role:Kepegawaian'])->prefix('kepegawaian')->name('kepegawaian.')->group(function () {
-        // Bagian
         Route::get('/bagian', [KepegawaianController::class, 'bagianIndex'])->name('bagian.index');
         Route::get('/bagian/create', [KepegawaianController::class, 'bagianCreate'])->name('bagian.create');
         Route::post('/bagian', [KepegawaianController::class, 'bagianStore'])->name('bagian.store');
@@ -425,7 +438,6 @@ Route::middleware(['auth'])->group(function () {
         Route::put('/bagian/{bagian}', [KepegawaianController::class, 'bagianUpdate'])->name('bagian.update');
         Route::delete('/bagian/{bagian}', [KepegawaianController::class, 'bagianDestroy'])->name('bagian.destroy');
         
-        // Sub Bagian
         Route::get('/sub-bagian', [KepegawaianController::class, 'subBagianIndex'])->name('sub-bagian.index');
         Route::get('/sub-bagian/create', [KepegawaianController::class, 'subBagianCreate'])->name('sub-bagian.create');
         Route::post('/sub-bagian', [KepegawaianController::class, 'subBagianStore'])->name('sub-bagian.store');
@@ -433,7 +445,6 @@ Route::middleware(['auth'])->group(function () {
         Route::put('/sub-bagian/{subBagian}', [KepegawaianController::class, 'subBagianUpdate'])->name('sub-bagian.update');
         Route::delete('/sub-bagian/{subBagian}', [KepegawaianController::class, 'subBagianDestroy'])->name('sub-bagian.destroy');
         
-        // Jabatan
         Route::get('/jabatan', [KepegawaianController::class, 'jabatanIndex'])->name('jabatan.index');
         Route::get('/jabatan/create', [KepegawaianController::class, 'jabatanCreate'])->name('jabatan.create');
         Route::post('/jabatan', [KepegawaianController::class, 'jabatanStore'])->name('jabatan.store');
@@ -441,7 +452,6 @@ Route::middleware(['auth'])->group(function () {
         Route::put('/jabatan/{jabatan}', [KepegawaianController::class, 'jabatanUpdate'])->name('jabatan.update');
         Route::delete('/jabatan/{jabatan}', [KepegawaianController::class, 'jabatanDestroy'])->name('jabatan.destroy');
 
-        // Pegawai
         Route::get('/pegawai', [KepegawaianController::class, 'pegawaiIndex'])->name('pegawai.index');
         Route::get('/pegawai/create', [KepegawaianController::class, 'pegawaiCreate'])->name('pegawai.create');
         Route::post('/pegawai', [KepegawaianController::class, 'pegawaiStore'])->name('pegawai.store');

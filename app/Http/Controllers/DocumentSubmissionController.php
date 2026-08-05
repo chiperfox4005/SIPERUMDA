@@ -18,7 +18,6 @@ use Carbon\Carbon;
 
 class DocumentSubmissionController extends Controller
 {
-    // 1. RIWAYAT PEMOHON
     public function index()
     {
         $userNip = (string) auth()->user()->nip;
@@ -42,15 +41,12 @@ class DocumentSubmissionController extends Controller
             'bagians' => Bagian::with('subBagians')->orderBy('nama_bagian')->get(),
             'ruangans' => Ruangan::where('status', 'aktif')->orderBy('nama_ruangan')->get(),
             'users' => User::where('status', 'aktif')->orderBy('nama_lengkap')->get(),
-            'signatories' => Signatory::where('is_active', true)->orderBy('name')->get(),
         ];
         return view('submissions.buat', compact('template', 'options'));
     }
 
-    // 2. SIMPAN PENGAJUAN (PEMOHON)
     public function store(Request $request)
     {
-        // Validasi dasar (signatory_id DIHAPUS dari sini karena dipilih oleh Sekretariat nanti)
         $request->validate([
             'template_id' => 'required|exists:document_templates,id',
         ]);
@@ -58,11 +54,7 @@ class DocumentSubmissionController extends Controller
         $template = DocumentTemplate::findOrFail($request->template_id);
         $fields = $template->form_schema['fields'] ?? [];
 
-        // Bangun validasi dinamis berdasarkan schema
-        $rules = [
-            'template_id' => 'required|exists:document_templates,id',
-        ];
-
+        $rules = ['template_id' => 'required|exists:document_templates,id'];
         foreach ($fields as $field) {
             if (!empty($field['name'])) {
                 $rule = (!empty($field['required']) ? 'required' : 'nullable') . '|string';
@@ -70,14 +62,9 @@ class DocumentSubmissionController extends Controller
             }
         }
 
-        // Jika validasi gagal, Laravel otomatis redirect back dengan error
         $validated = $request->validate($rules);
-
-        // Ambil semua data kecuali field kontrol Laravel
         $dataJson = $request->except(['_token', '_method', 'template_id', 'signatory_id']);
 
-        // SIMPAN DENGAN STATUS 'submitted' 
-        // signatory_id akan bernilai NULL, nanti diisi oleh Sekretariat saat Approval
         $submission = DocumentSubmission::create([
             'user_id' => (string) auth()->user()->nip,
             'template_id' => $validated['template_id'],
@@ -85,7 +72,6 @@ class DocumentSubmissionController extends Controller
             'status' => 'submitted', 
         ]);
 
-        // ✅ KIRIM NOTIFIKASI KE SEMUA SEKRETARIAT / ADMIN
         $secretaries = User::whereHas('roles', function($q) {
             $q->whereIn('name', ['Sekretariat', 'IT Administrator', 'Administrator']);
         })->get();
@@ -94,33 +80,23 @@ class DocumentSubmissionController extends Controller
             $secretary->notify(new DocumentSubmittedNotification($submission));
         }
 
-        // ✅ Redirect dengan pesan sukses yang JELAS
-        return redirect()->route('surat.index')
-            ->with('success', '✅ Pengajuan surat BERHASIL dikirim! Notifikasi telah dikirim ke Sekretariat.');
+        return redirect()->route('surat.index')->with('success', '✅ Pengajuan surat BERHASIL dikirim!');
     }
 
     public function show(DocumentSubmission $submission)
     {
-        // ✅ Muat relasi agar tidak error saat memanggil $submission->template atau $submission->creator
         $submission->load(['template', 'creator', 'signatory']);
-        
         $userNip = (string) auth()->user()->nip;
         $isAdmin = auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']);
         abort_unless($submission->user_id === $userNip || $isAdmin, 403);
         
         $dataJson = is_string($submission->data_json) ? json_decode($submission->data_json, true) : ($submission->data_json ?? []);
-        
-        // ✅ Pastikan nama variabel yang dikirim adalah 'submission', BUKAN 'surat'
         return view('submissions.show', compact('submission', 'dataJson'));
     }
 
-    // 3. HALAMAN VERIFIKASI (SEKRETARIAT)
     public function approval()
     {
         abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
-        
-        // ✅ PERBAIKAN: Ambil SEMUA status (submitted, approved, rejected) 
-        // agar sekretaris bisa melihat hasil verifikasi secara lengkap
         $submissions = DocumentSubmission::with(['creator', 'template', 'signatory'])
             ->whereIn('status', ['submitted', 'approved', 'rejected'])
             ->latest()
@@ -129,22 +105,19 @@ class DocumentSubmissionController extends Controller
         return view('submissions.approval', compact('submissions'));
     }
 
-    // 4. PROSES APPROVE & GENERATE PDF (SEKRETARIAT)
-    // ✅ Di sinilah Sekretariat WAJIB memilih signatory_id
     public function approve(Request $request, DocumentSubmission $submission)
     {
         abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
 
         $validated = $request->validate([
             'nomor_surat' => 'required|string|unique:document_submissions,nomor_surat,' . $submission->id,
-            'signatory_id' => 'required|exists:signatories,id', // WAJIB di sini
+            'signatory_id' => 'required|exists:signatories,id',
         ]);
 
-        // ✅ PASTIKAN UPDATE INI BERJALAN
         $submission->update([
             'status' => 'approved',
             'nomor_surat' => $validated['nomor_surat'],
-            'signatory_id' => $validated['signatory_id'], // Disimpan di sini
+            'signatory_id' => $validated['signatory_id'],
             'approved_at' => now(),
             'approved_by' => (string) auth()->user()->nip,
         ]);
@@ -152,45 +125,47 @@ class DocumentSubmissionController extends Controller
         $signatory = Signatory::find($validated['signatory_id']);
         $dataJson = is_string($submission->data_json) ? json_decode($submission->data_json, true) : ($submission->data_json ?? []);
         
-        $data = [
+        // ✅ PERBAIKAN: Gunakan translatedFormat agar bulan Indonesia muncul dengan benar (misal: 4 Agustus 2026)
+        $pdfData = [
             'submission' => $submission,
             'signatory' => $signatory,
             'data' => $dataJson,
-            'tanggalCetak' => Carbon::now()->locale('id')->isoFormat('D MMMM Y'),
+            'tanggalCetak' => Carbon::now()->locale('id')->translatedFormat('d F Y'),
         ];
 
         $slug = $submission->template->slug ?? 'undangan-rapat';
         $viewPath = 'templates.surat.' . str_replace('-', '_', $slug);
         if (!view()->exists($viewPath)) {
-            $viewPath = 'templates.surat.undangan-rapat';
+            $viewPath = 'templates.surat.undangan_rapat';
         }
 
-        $pdf = Pdf::loadView($viewPath, $data);
+        $pdf = Pdf::loadView($viewPath, $pdfData);
         $pdf->setPaper('A4', 'portrait');
         $pdf->setOption('isRemoteEnabled', true);
 
         $fileName = str_replace('/', '-', $validated['nomor_surat']) . '.pdf';
         $pdfPath = 'surat_pdf/' . $fileName;
+        
+        if (!Storage::disk('public')->exists('surat_pdf')) {
+            Storage::disk('public')->makeDirectory('surat_pdf');
+        }
+        
         Storage::disk('public')->put($pdfPath, $pdf->output());
-
         $submission->update(['pdf_path' => $pdfPath]);
 
-        // ✅ KIRIM NOTIFIKASI KE PEMOHON
         $pemohon = User::where('nip', $submission->user_id)->first();
         if ($pemohon) {
             $pemohon->notify(new DocumentApprovedNotification($submission));
         }
 
-        return redirect()->route('surat.approval')->with('success', '✅ Surat BERHASIL diverifikasi, PDF digenerate, dan notifikasi dikirim ke pemohon!');
+        return redirect()->route('surat.approval')->with('success', '✅ Surat BERHASIL diverifikasi & PDF digenerate!');
     }
 
     public function reject(Request $request, DocumentSubmission $submission)
     {
         abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
         
-        $validated = $request->validate([
-            'rejection_reason' => 'required|string|max:500'
-        ]);
+        $validated = $request->validate(['rejection_reason' => 'required|string|max:500']);
 
         $submission->update([
             'status' => 'rejected',
@@ -199,20 +174,22 @@ class DocumentSubmissionController extends Controller
             'approved_by' => (string) auth()->user()->nip,
         ]);
 
-        // ✅ KIRIM NOTIFIKASI KE PEMOHON
         $pemohon = User::where('nip', $submission->user_id)->first();
         if ($pemohon) {
             $pemohon->notify(new DocumentRejectedNotification($submission));
         }
 
-        return redirect()->route('surat.approval')->with('success', 'Surat telah ditolak dan notifikasi dikirim ke pemohon.');
+        return redirect()->route('surat.approval')->with('success', 'Surat telah ditolak.');
     }
 
     public function generateNomorSurat()
     {
         $tahun = Carbon::now()->format('Y');
         $bulanRomawi = ['I','II','III','IV','V','VI','VII','VIII','IX','X','XI','XII'][Carbon::now()->format('n') - 1];
-        $count = DocumentSubmission::whereYear('created_at', $tahun)->whereMonth('created_at', Carbon::now()->format('m'))->count() + 1;
+        $count = DocumentSubmission::whereYear('created_at', $tahun)
+            ->whereMonth('created_at', Carbon::now()->format('m'))
+            ->whereNotNull('nomor_surat')
+            ->count() + 1;
         
         return response()->json([
             'nomor_surat' => str_pad($count, 3, '0', STR_PAD_LEFT) . "/SIPERUMDA/{$bulanRomawi}/{$tahun}"

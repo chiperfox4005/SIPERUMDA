@@ -10,23 +10,48 @@ use Illuminate\Http\Request;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\View\View;
 use Illuminate\Support\Facades\Storage;
+use Carbon\Carbon;
 
 class PeminjamanRuanganController extends Controller 
 {
+    /**
+     * ✅ HELPER: Cek bentrok jadwal peminjaman ruangan
+     */
+    private function cekBentrokJadwal($ruanganId, $tanggal, $jamMulai, $jamSelesai, $excludeId = null)
+    {
+        if (!$ruanganId) return collect();
+
+        $query = PeminjamanRuangan::where('ruangan_id', $ruanganId)
+            ->whereDate('tanggal_pemakaian', Carbon::parse($tanggal)->toDateString())
+            ->whereIn('status_persetujuan', ['menunggu', 'disetujui', 'dijadwalkan_ulang']) // Ditambahkan dijadwalkan_ulang agar lebih akurat
+            ->where(function($q) use ($jamMulai, $jamSelesai) {
+                $q->where('waktu_mulai', '<', $jamSelesai)
+                  ->where('waktu_selesai', '>', $jamMulai);
+            });
+
+        if ($excludeId) {
+            $query->where('id', '!=', $excludeId);
+        }
+
+        return $query->with(['pemohon', 'ruangan'])->get();
+    }
+
     /**
      * Menampilkan daftar peminjaman.
      */
     public function index()
     {
         $user = auth()->user();
+        // ✅ OPTIMALISASI: Fallback ke user->id jika nip kosong (untuk role Admin/IT)
+        $userIdentifier = (string) ($user->nip ?? $user->id);
         
         if ($user->hasRole(['Sekretariat', 'IT Administrator', 'Administrator'])) {
             $peminjamans = PeminjamanRuangan::with(['ruangan', 'pemohon', 'agenda'])
                 ->latest()
                 ->paginate(10);
         } else {
-            $peminjamans = PeminjamanRuangan::with(['ruangan', 'agenda'])
-                ->where('user_id', (string) $user->nip)
+            $peminjamans = PeminjamanRuangan::with(['ruangan', 'agenda', 'pemohon'])
+                ->where('user_id', $userIdentifier)
                 ->latest()
                 ->paginate(10);
         }
@@ -35,63 +60,60 @@ class PeminjamanRuanganController extends Controller
     }
 
     /**
-     * KHUSUS SEKRETARIAT: Menampilkan antrian permohonan dengan konteks lengkap
+     * KHUSUS SEKRETARIAT/ADMIN: Menampilkan antrian permohonan dengan konteks lengkap
      */
-    public function approval(): View
+    public function approval(Request $request)
     {
-        abort_unless(
-            auth()->user()->hasRole('Sekretariat') || auth()->user()->hasRole('IT Administrator'), 
-            403, 
-            'Akses ditolak.'
-        );
+        abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
 
-        $permohonanMenunggu = PeminjamanRuangan::with(['ruangan', 'pemohon.bagian', 'pemohon.subBagian', 'agenda'])
-            ->where('status_persetujuan', 'menunggu')
-            ->orderBy('created_at', 'asc')
+        $query = PeminjamanRuangan::with(['pemohon', 'ruangan', 'pemohon.bagian', 'pemohon.subBagian', 'agenda']);
+
+        if ($request->filled('status')) {
+            $query->where('status_persetujuan', $request->status);
+        }
+        
+        $peminjamanRuangans = $query
+            ->orderByRaw("
+                CASE 
+                    WHEN status_persetujuan = 'menunggu' THEN 0
+                    WHEN status_persetujuan = 'dijadwalkan_ulang' THEN 1
+                    WHEN status_persetujuan = 'disetujui' THEN 2
+                    ELSE 3
+                END
+            ")
+            ->orderBy('created_at', 'desc')
             ->get();
 
-        $permohonanMenunggu->transform(function($peminjaman) {
-            $konflik = PeminjamanRuangan::where('ruangan_id', $peminjaman->ruangan_id)
-                ->where('tanggal_pemakaian', $peminjaman->tanggal_pemakaian)
-                ->where('id', '!=', $peminjaman->id)
-                ->whereIn('status_persetujuan', ['menunggu', 'disetujui']) 
-                ->where(function($q) use ($peminjaman) {
-                    $q->where('waktu_mulai', '<', $peminjaman->waktu_selesai)
-                      ->where('waktu_selesai', '>', $peminjaman->waktu_mulai);
-                })
-                ->with(['pemohon.bagian'])
-                ->get();
+        // ✅ CEK BENTROK OTOMATIS UNTUK SETIAP ITEM
+        foreach ($peminjamanRuangans as $p) {
+            $p->bentrokDengan = collect();
+            if (in_array($p->status_persetujuan, ['menunggu', 'dijadwalkan_ulang'])) {
+                $conflicts = PeminjamanRuangan::where('ruangan_id', $p->ruangan_id)
+                    ->whereDate('tanggal_pemakaian', $p->tanggal_pemakaian)
+                    ->where('id', '!=', $p->id)
+                    ->whereIn('status_persetujuan', ['menunggu', 'disetujui', 'dijadwalkan_ulang'])
+                    ->where(function($q) use ($p) {
+                        $q->where('waktu_mulai', '<', $p->waktu_selesai)
+                          ->where('waktu_selesai', '>', $p->waktu_mulai);
+                    })
+                    ->with('pemohon')
+                    ->get();
+                
+                if ($conflicts->isNotEmpty()) {
+                    $p->bentrokDengan = $conflicts;
+                }
+            }
+        }
 
-            $jadwalSekitar = PeminjamanRuangan::where('ruangan_id', $peminjaman->ruangan_id)
-                ->where('tanggal_pemakaian', $peminjaman->tanggal_pemakaian)
-                ->where('id', '!=', $peminjaman->id)
-                ->whereIn('status_persetujuan', ['menunggu', 'disetujui'])
-                ->orderBy('waktu_mulai', 'asc')
-                ->with(['pemohon.bagian'])
-                ->get();
-
-            $peminjaman->konflik = $konflik;
-            $peminjaman->jadwal_sekitar = $jadwalSekitar;
-
-            return $peminjaman;
-        });
-
-        $disetujuiHariIni = PeminjamanRuangan::whereDate('updated_at', today())
-            ->where('status_persetujuan', 'disetujui')
-            ->count();
-
-        return view('peminjaman-ruangan.approval', compact('permohonanMenunggu', 'disetujuiHariIni'));
+        return view('peminjaman-ruangan.approval', compact('peminjamanRuangans'));
     }
 
     /**
-     * Reschedule permohonan (Sekretariat menawarkan jadwal alternatif) - LOGIKA LAMA DIPERTAHANKAN
+     * Reschedule permohonan (Sekretariat menawarkan jadwal alternatif)
      */
     public function reschedule(Request $request, PeminjamanRuangan $peminjamanRuangan)
     {
-        abort_unless(
-            auth()->user()->hasRole('Sekretariat') || auth()->user()->hasRole('IT Administrator'), 
-            403
-        );
+        abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
 
         $validated = $request->validate([
             'tanggal_baru' => 'required|date',
@@ -101,11 +123,11 @@ class PeminjamanRuanganController extends Controller
         ]);
 
         $isAvailable = !PeminjamanRuangan::where('ruangan_id', $peminjamanRuangan->ruangan_id)
-            ->where('tanggal_pemakaian', $validated['tanggal_baru'])
+            ->whereDate('tanggal_pemakaian', $validated['tanggal_baru'])
             ->where('status_persetujuan', 'disetujui')
             ->where(function($q) use ($validated) {
-                $q->whereBetween('waktu_mulai', [$validated['waktu_mulai_baru'], $validated['waktu_selesai_baru']])
-                  ->orWhereBetween('waktu_selesai', [$validated['waktu_mulai_baru'], $validated['waktu_selesai_baru']]);
+                $q->where('waktu_mulai', '<', $validated['waktu_selesai_baru'])
+                  ->where('waktu_selesai', '>', $validated['waktu_mulai_baru']);
             })
             ->exists();
 
@@ -161,7 +183,38 @@ class PeminjamanRuanganController extends Controller
             'lampiran' => 'nullable|file|mimes:pdf,doc,docx,xls,xlsx,jpg,jpeg,png|max:2048',
         ]);
 
+        $bentrokList = $this->cekBentrokJadwal(
+            $validated['ruangan_id'],
+            $validated['tanggal_pemakaian'],
+            $validated['waktu_mulai'],
+            $validated['waktu_selesai']
+        );
+
+        if ($bentrokList->isNotEmpty()) {
+            $ruangan = Ruangan::find($validated['ruangan_id']);
+            $namaRuangan = $ruangan ? $ruangan->nama_ruangan : 'Ruangan';
+            $tanggalFormat = Carbon::parse($validated['tanggal_pemakaian'])->locale('id')->isoFormat('dddd, D MMMM Y');
+
+            $detailBentrok = [];
+            foreach ($bentrokList as $b) {
+                $namaPemohon = 'Unknown';
+                if ($b->relationLoaded('pemohon') && $b->pemohon) {
+                    $namaPemohon = $b->pemohon->nama_lengkap ?? $b->pemohon->name ?? 'NIP ' . $b->user_id;
+                }
+                $detailBentrok[] = "• <strong>{$b->waktu_mulai} - {$b->waktu_selesai}</strong> oleh <strong>{$namaPemohon}</strong> ({$b->keperluan})";
+            }
+
+            $pesan = "<strong>⚠️ Jadwal Bentrok!</strong><br>"
+                . "{$namaRuangan} pada tanggal <strong>{$tanggalFormat}</strong> sudah dipinjam pada waktu berikut:<br><br>"
+                . implode("<br>", $detailBentrok)
+                . "<br><br>Silakan pilih <strong>waktu lain</strong> atau <strong>ruangan berbeda</strong>.";
+
+            return back()->withErrors(['bentrok' => $pesan])->withInput();
+        }
+
         $user = auth()->user();
+        // ✅ OPTIMALISASI: Simpan nip, jika kosong simpan id user (agar Admin bisa submit)
+        $userIdentifier = (string) ($user->nip ?? $user->id);
 
         if ($request->hasFile('lampiran')) {
             $validated['lampiran'] = $request->file('lampiran')->store('peminjaman_ruangan', 'public');
@@ -170,7 +223,7 @@ class PeminjamanRuanganController extends Controller
         PeminjamanRuangan::create([
             'ruangan_id' => $validated['ruangan_id'],
             'agenda_id' => $validated['agenda_id'] ?? null,
-            'user_id' => (string) $user->nip,
+            'user_id' => $userIdentifier, // Menggunakan identifier yang aman
             'tanggal_pemakaian' => $validated['tanggal_pemakaian'],
             'waktu_mulai' => $validated['waktu_mulai'],
             'waktu_selesai' => $validated['waktu_selesai'],
@@ -183,8 +236,22 @@ class PeminjamanRuanganController extends Controller
             'catatan_penolakan' => null,
         ]);
 
+        // ✅ NOTIFIKASI: Kirim ke Sekretariat & Admin lain
+        $approvers = User::whereHas('roles', function($q) {
+            $q->whereIn('name', ['Sekretariat', 'Administrator', 'IT Administrator']);
+        })->where('id', '!=', $user->id)->get();
+
+        foreach ($approvers as $approver) {
+            $approver->notify(new StatusPeminjamanRuanganNotification(
+                PeminjamanRuangan::latest()->first(), // Ambil data terbaru yang baru saja dibuat
+                'pengajuan',
+                $user->nama_lengkap ?? $user->name,
+                'Pengajuan peminjaman ruangan baru menunggu persetujuan Anda.'
+            ));
+        }
+
         return redirect()->route('peminjaman-ruangan.index')
-            ->with('success', 'Permohonan peminjaman berhasil diajukan! Menunggu persetujuan Sekretariat.');
+            ->with('success', '✅ Permohonan peminjaman berhasil diajukan! Menunggu persetujuan.');
     }
 
     public function show(PeminjamanRuangan $peminjamanRuangan): View
@@ -195,7 +262,11 @@ class PeminjamanRuanganController extends Controller
 
     public function edit(PeminjamanRuangan $peminjamanRuangan): View
     {
-        abort_if((string) auth()->user()->nip !== $peminjamanRuangan->user_id, 403);
+        $user = auth()->user();
+        // ✅ OPTIMALISASI: Cek kepemilikan berdasarkan NIP atau ID
+        $isOwner = ($peminjamanRuangan->user_id == $user->nip) || ((string)$peminjamanRuangan->user_id == (string)$user->id);
+        
+        abort_if(!$isOwner, 403, 'Anda tidak memiliki izin untuk mengubah data ini.');
         abort_if($peminjamanRuangan->status_persetujuan !== 'menunggu', 403, 'Pengajuan yang sudah diproses tidak dapat diubah.');
         
         $ruangans = Ruangan::where('status', 'aktif')->get();
@@ -204,7 +275,10 @@ class PeminjamanRuanganController extends Controller
 
     public function update(Request $request, PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_if((string) auth()->user()->nip !== $peminjamanRuangan->user_id, 403);
+        $user = auth()->user();
+        $isOwner = ($peminjamanRuangan->user_id == $user->nip) || ((string)$peminjamanRuangan->user_id == (string)$user->id);
+        
+        abort_if(!$isOwner, 403, 'Anda tidak memiliki izin untuk mengubah data ini.');
         abort_if($peminjamanRuangan->status_persetujuan !== 'menunggu', 403);
         
         $validated = $request->validate([
@@ -221,12 +295,15 @@ class PeminjamanRuanganController extends Controller
         }
 
         $peminjamanRuangan->update($validated);
-        return redirect()->route('peminjaman-ruangan.index')->with('success', 'Data peminjaman berhasil diperbarui.');
+        return redirect()->route('peminjaman-ruangan.index')->with('success', '✅ Data peminjaman berhasil diperbarui.');
     }
 
     public function destroy(PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_if((string) auth()->user()->nip !== $peminjamanRuangan->user_id, 403);
+        $user = auth()->user();
+        $isOwner = ($peminjamanRuangan->user_id == $user->nip) || ((string)$peminjamanRuangan->user_id == (string)$user->id);
+        
+        abort_if(!$isOwner, 403, 'Anda tidak memiliki izin untuk menghapus data ini.');
         abort_if($peminjamanRuangan->status_persetujuan !== 'menunggu', 403, 'Pengajuan yang sudah diproses tidak dapat dibatalkan.');
         
         if ($peminjamanRuangan->lampiran && Storage::disk('public')->exists($peminjamanRuangan->lampiran)) {
@@ -234,7 +311,7 @@ class PeminjamanRuanganController extends Controller
         }
 
         $peminjamanRuangan->delete();
-        return redirect()->route('peminjaman-ruangan.index')->with('success', 'Pengajuan peminjaman berhasil dibatalkan.');
+        return redirect()->route('peminjaman-ruangan.index')->with('success', '✅ Pengajuan peminjaman berhasil dibatalkan.');
     }
 
     // =================================================================
@@ -243,44 +320,60 @@ class PeminjamanRuanganController extends Controller
 
     public function approve(PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_unless(auth()->user()->hasRole('Sekretariat') || auth()->user()->hasRole('IT Administrator'), 403);
+        abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
+
+        $user = auth()->user();
+        $approverId = (string) ($user->nip ?? $user->id);
 
         $peminjamanRuangan->update([
             'status_persetujuan' => 'disetujui',
             'status_peminjaman' => 'disetujui',
-            'disetujui_oleh' => (string) auth()->user()->nip,
+            'disetujui_oleh' => $approverId,
             'tanggal_disetujui' => now(),
         ]);
 
-        if ($peminjamanRuangan->pemohon) {
-            $peminjamanRuangan->pemohon->notify(new StatusPeminjamanRuanganNotification(
+        // ✅ OPTIMALISASI NOTIFIKASI: Cari pemohon berdasarkan user_id (bisa berupa NIP atau ID)
+        $pemohon = User::where('nip', $peminjamanRuangan->user_id)
+                       ->orWhere('id', $peminjamanRuangan->user_id)
+                       ->first();
+                       
+        if ($pemohon) {
+            $pemohon->notify(new StatusPeminjamanRuanganNotification(
                 $peminjamanRuangan, 
                 'disetujui', 
-                'Permohonan peminjaman ruangan Anda telah disetujui oleh Sekretariat.'
+                $user->nama_lengkap ?? 'Sekretariat',
+                'Permohonan peminjaman ruangan Anda telah disetujui.'
             ));
         }
 
-        return redirect()->back()->with('success', 'Peminjaman ruangan telah disetujui.');
+        return redirect()->back()->with('success', '✅ Peminjaman ruangan telah disetujui.');
     }
 
     public function reject(Request $request, PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_unless(auth()->user()->hasRole('Sekretariat') || auth()->user()->hasRole('IT Administrator'), 403);
+        abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
 
         $request->validate(['catatan_penolakan' => 'required|string|max:500']);
+        $user = auth()->user();
+        $rejectorId = (string) ($user->nip ?? $user->id);
 
         $peminjamanRuangan->update([
             'status_persetujuan' => 'ditolak',
             'status_peminjaman' => 'ditolak',
             'catatan_penolakan' => $request->catatan_penolakan,
-            'ditolak_oleh' => (string) auth()->user()->nip,
+            'ditolak_oleh' => $rejectorId,
             'tanggal_ditolak' => now(),
         ]);
 
-        if ($peminjamanRuangan->pemohon) {
-            $peminjamanRuangan->pemohon->notify(new StatusPeminjamanRuanganNotification(
+        $pemohon = User::where('nip', $peminjamanRuangan->user_id)
+                       ->orWhere('id', $peminjamanRuangan->user_id)
+                       ->first();
+                       
+        if ($pemohon) {
+            $pemohon->notify(new StatusPeminjamanRuanganNotification(
                 $peminjamanRuangan, 
                 'ditolak', 
+                $user->nama_lengkap ?? 'Sekretariat',
                 'Permohonan Anda ditolak. Alasan: ' . $request->catatan_penolakan
             ));
         }
@@ -290,11 +383,14 @@ class PeminjamanRuanganController extends Controller
 
     public function cancel(PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_if((string) auth()->user()->nip !== $peminjamanRuangan->user_id, 403);
+        $user = auth()->user();
+        $isOwner = ($peminjamanRuangan->user_id == $user->nip) || ((string)$peminjamanRuangan->user_id == (string)$user->id);
+        
+        abort_if(!$isOwner, 403, 'Anda tidak memiliki izin.');
         abort_if($peminjamanRuangan->status_persetujuan !== 'menunggu', 403);
 
         $peminjamanRuangan->update(['status_persetujuan' => 'dibatalkan']);
-        return redirect()->back()->with('success', 'Pengajuan peminjaman dibatalkan.');
+        return redirect()->back()->with('success', '✅ Pengajuan peminjaman dibatalkan.');
     }
 
     public function checkAvailability(Request $request)
@@ -306,54 +402,76 @@ class PeminjamanRuanganController extends Controller
             'waktu_selesai' => 'required',
         ]);
 
-        $isAvailable = !PeminjamanRuangan::where('ruangan_id', $request->ruangan_id)
-            ->where('tanggal_pemakaian', $request->tanggal)
-            ->where('status_persetujuan', 'disetujui')
-            ->where(function($q) use ($request) {
-                $q->whereBetween('waktu_mulai', [$request->waktu_mulai, $request->waktu_selesai])
-                  ->orWhereBetween('waktu_selesai', [$request->waktu_mulai, $request->waktu_selesai])
-                  ->orWhere(function($q2) use ($request) {
-                      $q2->where('waktu_mulai', '<=', $request->waktu_mulai)
-                         ->where('waktu_selesai', '>=', $request->waktu_selesai);
-                  });
-            })
-            ->exists();
+        $bentrokList = $this->cekBentrokJadwal(
+            $request->ruangan_id,
+            $request->tanggal,
+            $request->waktu_mulai,
+            $request->waktu_selesai
+        );
+
+        $isAvailable = $bentrokList->isEmpty();
+        $message = 'Ruangan tersedia pada waktu tersebut.';
+        
+        if (!$isAvailable) {
+            $detail = [];
+            foreach ($bentrokList as $b) {
+                $namaPemohon = $b->pemohon ? ($b->pemohon->nama_lengkap ?? $b->pemohon->name ?? 'NIP ' . $b->user_id) : 'NIP ' . $b->user_id;
+                $detail[] = "{$b->waktu_mulai}-{$b->waktu_selesai} oleh {$namaPemohon}";
+            }
+            $message = 'Ruangan sudah dipesan: ' . implode(', ', $detail);
+        }
 
         return response()->json([
             'available' => $isAvailable,
-            'message' => $isAvailable ? 'Ruangan tersedia pada waktu tersebut.' : 'Ruangan sudah dipesan pada waktu tersebut.'
+            'message' => $message,
+            'conflicts' => $bentrokList->map(fn($b) => [
+                'waktu_mulai' => $b->waktu_mulai,
+                'waktu_selesai' => $b->waktu_selesai,
+                'keperluan' => $b->keperluan,
+                'pemohon' => $b->pemohon ? ($b->pemohon->nama_lengkap ?? $b->pemohon->name ?? null) : null,
+            ])->toArray(),
         ]);
     }
 
     public function revoke(Request $request, PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator']), 403);
+        abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
         abort_if($peminjamanRuangan->status_persetujuan !== 'disetujui', 403, 'Hanya peminjaman yang sudah disetujui yang dapat dibatalkan.');
 
         $request->validate(['catatan_pembatalan' => 'required|string|max:500']);
+        $user = auth()->user();
+        $revokerId = (string) ($user->nip ?? $user->id);
 
         $peminjamanRuangan->update([
             'status_persetujuan' => 'dibatalkan',
             'status_peminjaman' => 'dibatalkan',
             'catatan_pembatalan' => $request->catatan_pembatalan,
-            'ditolak_oleh' => (string) auth()->user()->nip,
+            'ditolak_oleh' => $revokerId,
             'tanggal_ditolak' => now(),
         ]);
 
-        if ($peminjamanRuangan->pemohon) {
-            $peminjamanRuangan->pemohon->notify(new StatusPeminjamanRuanganNotification(
+        $pemohon = User::where('nip', $peminjamanRuangan->user_id)
+                       ->orWhere('id', $peminjamanRuangan->user_id)
+                       ->first();
+                       
+        if ($pemohon) {
+            $pemohon->notify(new StatusPeminjamanRuanganNotification(
                 $peminjamanRuangan, 
                 'dibatalkan', 
+                $user->nama_lengkap ?? 'Sekretariat',
                 'Peminjaman yang sudah disetujui dibatalkan. Alasan: ' . $request->catatan_pembatalan
             ));
         }
 
-        return redirect()->back()->with('success', 'Peminjaman berhasil DIBATALKAN.');
+        return redirect()->back()->with('success', '✅ Peminjaman berhasil DIBATALKAN.');
     }
 
     public function confirmReschedule(PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_if((string) auth()->user()->nip !== $peminjamanRuangan->user_id, 403);
+        $user = auth()->user();
+        $isOwner = ($peminjamanRuangan->user_id == $user->nip) || ((string)$peminjamanRuangan->user_id == (string)$user->id);
+        
+        abort_if(!$isOwner, 403, 'Anda tidak memiliki izin.');
         abort_if($peminjamanRuangan->status_persetujuan !== 'menunggu_konfirmasi', 403);
 
         $peminjamanRuangan->update([
@@ -363,12 +481,15 @@ class PeminjamanRuanganController extends Controller
         ]);
 
         return redirect()->route('peminjaman-ruangan.show', $peminjamanRuangan)
-            ->with('success', 'Jadwal baru berhasil dikonfirmasi. Peminjaman Anda Disetujui!');
+            ->with('success', '✅ Jadwal baru berhasil dikonfirmasi. Peminjaman Anda Disetujui!');
     }
 
     public function rejectReschedule(PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
-        abort_if((string) auth()->user()->nip !== $peminjamanRuangan->user_id, 403);
+        $user = auth()->user();
+        $isOwner = ($peminjamanRuangan->user_id == $user->nip) || ((string)$peminjamanRuangan->user_id == (string)$user->id);
+        
+        abort_if(!$isOwner, 403, 'Anda tidak memiliki izin.');
         abort_if($peminjamanRuangan->status_persetujuan !== 'menunggu_konfirmasi', 403);
 
         $peminjamanRuangan->update([
@@ -380,13 +501,6 @@ class PeminjamanRuanganController extends Controller
             ->with('info', 'Jadwal usulan Sekretariat ditolak. Silakan edit dan ajukan kembali.');
     }
 
-    // =================================================================
-    // ✅ FITUR BARU: RESCHEDULE LANGSUNG DENGAN CATATAN (BADGE MERAH)
-    // =================================================================
-    /**
-     * Reschedule Langsung dengan Catatan (Mengubah status menjadi Dijadwalkan Ulang / Merah)
-     * Tanpa mengubah tanggal, hanya memberi catatan dan mengubah status jadi merah.
-     */
     public function rescheduleDenganCatatan(Request $request, PeminjamanRuangan $peminjamanRuangan): RedirectResponse
     {
         abort_unless(auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 403);
@@ -396,25 +510,31 @@ class PeminjamanRuanganController extends Controller
             'catatan_reschedule' => 'required|string|max:500',
         ]);
 
-        // ✅ PENTING: Load relasi pemohon agar data pengaju tersedia untuk notifikasi
         $peminjamanRuangan->loadMissing('pemohon');
+        $user = auth()->user();
+        $revokerId = (string) ($user->nip ?? $user->id);
 
         $peminjamanRuangan->update([
             'status_persetujuan' => 'dijadwalkan_ulang',
             'status_peminjaman' => 'dijadwalkan_ulang',
             'catatan_penolakan' => '[Reschedule] ' . $validated['catatan_reschedule'],
-            'ditolak_oleh' => (string) auth()->user()->nip,
+            'ditolak_oleh' => $revokerId,
             'tanggal_ditolak' => now(),
         ]);
 
-        if ($peminjamanRuangan->pemohon) {
-            $peminjamanRuangan->pemohon->notify(new StatusPeminjamanRuanganNotification(
+        $pemohon = User::where('nip', $peminjamanRuangan->user_id)
+                       ->orWhere('id', $peminjamanRuangan->user_id)
+                       ->first();
+
+        if ($pemohon) {
+            $pemohon->notify(new StatusPeminjamanRuanganNotification(
                 $peminjamanRuangan, 
                 'dijadwalkan_ulang', 
-                'Peminjaman ruangan Anda dijadwalkan ulang/dibatalkan oleh Sekretariat. Catatan: ' . $validated['catatan_reschedule']
+                $user->nama_lengkap ?? 'Sekretariat',
+                'Peminjaman ruangan Anda dijadwalkan ulang/dibatalkan. Catatan: ' . $validated['catatan_reschedule']
             ));
         }
 
-        return redirect()->back()->with('success', 'Peminjaman berhasil dijadwalkan ulang. Pemohon telah diberi tahu.');
+        return redirect()->back()->with('success', '✅ Peminjaman berhasil dijadwalkan ulang. Pemohon telah diberi tahu.');
     }
 }

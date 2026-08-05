@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>SIPERUMDA - @yield('title', 'Dashboard')</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
@@ -11,14 +12,21 @@
     <style>
         :root { --primary-color: #1F3864; --sidebar-width: 260px; }
         body { background-color: #f4f6f9; font-family: 'Segoe UI', sans-serif; }
-        .sidebar { width: var(--sidebar-width); background-color: var(--primary-color); min-height: 100vh; position: fixed; color: white; z-index: 1000; }
+        .sidebar { width: var(--sidebar-width); background-color: var(--primary-color); min-height: 100vh; position: fixed; color: white; z-index: 1000; overflow-y: auto; }
         .sidebar .nav-link { color: rgba(255,255,255,0.8); padding: 12px 20px; border-radius: 8px; margin: 4px 10px; font-size: 0.95rem; text-decoration: none; display: flex; align-items: center; }
         .sidebar .nav-link:hover, .sidebar .nav-link.active { background-color: rgba(255,255,255,0.15); color: white; }
         .sidebar .nav-link i { margin-right: 10px; width: 20px; text-align: center; }
         .main-content { margin-left: var(--sidebar-width); padding: 20px 30px; }
-        .topbar { background: white; padding: 15px 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
+        .topbar { background: white; padding: 15px 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; flex-wrap: wrap; gap: 15px; }
         .section-label { font-size: 0.7rem; letter-spacing: 1.5px; color: rgba(255,255,255,0.4); padding: 15px 20px 8px 20px; font-weight: 700; text-transform: uppercase; }
         .btn-fab, .floating-action-button, .fab-button, .fixed-bottom-btn, .carousel-control-prev, .carousel-control-next { display: none !important; }
+
+        @media (max-width: 991.98px) {
+            :root { --sidebar-width: 0px; }
+            .sidebar { transform: translateX(-260px); transition: transform 0.3s ease; }
+            .sidebar.show { transform: translateX(0); width: 260px; }
+            .main-content { margin-left: 0 !important; padding: 15px; }
+        }
     </style>
     @stack('styles')
 </head>
@@ -61,7 +69,7 @@
     @endphp
 
     <!-- Sidebar -->
-    <div class="sidebar d-flex flex-column p-3">
+    <div class="sidebar d-flex flex-column p-3" id="appSidebar">
         <div class="mb-4 px-2 mt-2">
             <h4 class="fw-bold mb-0">SIPERUMDA</h4>
             <small class="text-white-50">Sistem Informasi Pengelolaan Ruangan, Pengumuman, dan Agenda</small>
@@ -216,52 +224,60 @@
     <!-- Main Content Area -->
     <div class="main-content">
         <div class="topbar">
-            <div class="d-flex align-items-center">
-                <div class="input-group" style="width: 300px;">
+            <div class="d-flex align-items-center gap-2">
+                <button class="btn btn-light d-lg-none border" type="button" onclick="document.getElementById('appSidebar').classList.toggle('show')">
+                    <i class="bi bi-list fs-5"></i>
+                </button>
+                <div class="input-group" style="width: 250px; max-width: 100%;">
                     <span class="input-group-text bg-light border-0"><i class="bi bi-search"></i></span>
-                    <input type="text" class="form-control border-0 bg-light" placeholder="Cari agenda atau ruangan...">
+                    <input type="text" class="form-control border-0 bg-light" placeholder="Cari...">
                 </div>
             </div>
-            <div class="d-flex align-items-center gap-3">
-                <div class="dropdown">
-                    <a class="nav-link position-relative" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-                        <i class="bi bi-bell fs-5 text-secondary"></i>
-                        @if($totalUnread > 0)
-                            <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger" style="font-size: 0.65rem; padding: 0.25em 0.4em;">{{ $totalUnread }}</span>
+            <div class="d-flex align-items-center gap-3 flex-wrap">
+                
+                <!-- Tombol Notifikasi (Diperbarui dengan AJAX markAsRead) -->
+                <li class="nav-item dropdown list-unstyled">
+                    <a class="nav-link position-relative" href="#" id="notifDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                        <i class="bi bi-bell-fill fs-5 text-secondary"></i>
+                        @php
+                            $unreadCount = auth()->user()->unreadNotifications->count();
+                        @endphp
+                        @if($unreadCount > 0)
+                            <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger" style="font-size: 0.6rem;">
+                                {{ $unreadCount > 99 ? '99+' : $unreadCount }}
+                            </span>
                         @endif
                     </a>
-                    <ul class="dropdown-menu dropdown-menu-end shadow" style="width: 320px; max-height: 400px; overflow-y: auto;">
-                        <li class="dropdown-header d-flex justify-content-between align-items-center">
-                            <span class="fw-bold">Notifikasi</span>
-                            @if($totalUnread > 0)
-                                <form action="{{ route('notifikasi.mark-all-read') }}" method="POST" class="d-inline">
-                                    @csrf
-                                    <button type="submit" class="btn btn-sm btn-link text-decoration-none p-0" style="font-size: 0.8rem;">Tandai semua dibaca</button>
-                                </form>
-                            @endif
-                        </li>
-                        <li><hr class="dropdown-divider"></li>
-                        @forelse($unreadNotifs->take(5) as $notif)
+                    
+                    <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="notifDropdown" style="width: 320px; max-height: 400px; overflow-y: auto;">
+                        <li><h6 class="dropdown-header">Notifikasi Terbaru</h6></li>
+                        
+                        @forelse(auth()->user()->notifications->take(5) as $notif)
+                            @php
+                                $data = $notif->data;
+                                $bgClass = $data['color'] ?? 'warning';
+                            @endphp
                             <li>
-                                <form action="{{ route('notifikasi.mark-as-read', $notif->id) }}" method="POST">
-                                    @csrf
-                                    <button type="submit" class="dropdown-item d-flex align-items-start py-2 text-start" style="white-space: normal;">
-                                        <i class="{{ $notif->data['icon'] ?? 'bi bi-bell' }} text-warning me-2 mt-1"></i>
+                                <a class="dropdown-item {{ $notif->read_at ? 'text-muted' : 'fw-bold' }}" href="{{ $data['url'] ?? '#' }}" onclick="markAsRead('{{ $notif->id }}')">
+                                    <div class="d-flex align-items-start">
+                                        <i class="bi {{ $data['icon'] ?? 'bi-bell' }} text-{{ $bgClass }} me-2 mt-1"></i>
                                         <div>
-                                            <div class="fw-semibold small">{{ $notif->data['title'] ?? 'Notifikasi Baru' }}</div>
-                                            <div class="text-muted small" style="font-size: 0.75rem;">{{ Str::limit($notif->data['message'] ?? '', 50) }}</div>
-                                            <div class="text-muted" style="font-size: 0.7rem;">{{ $notif->created_at->diffForHumans() }}</div>
+                                            <small class="text-muted d-block">{{ $notif->created_at->diffForHumans() }}</small>
+                                            <div class="small">{!! $data['message'] ?? $data['title'] ?? '' !!}</div>
                                         </div>
-                                    </button>
-                                </form>
+                                    </div>
+                                </a>
                             </li>
+                            <li><hr class="dropdown-divider"></li>
                         @empty
-                            <li><span class="dropdown-item text-center text-muted py-3">Tidak ada notifikasi baru</span></li>
+                            <li><span class="dropdown-item text-center text-muted py-3">Tidak ada notifikasi</span></li>
                         @endforelse
-                        <li><hr class="dropdown-divider"></li>
-                        <li><a class="dropdown-item text-center text-primary small" href="{{ route('notifikasi.index') }}">Lihat Semua Notifikasi</a></li>
+                        
+                        <li>
+                            <a class="dropdown-item text-center small text-primary" href="{{ route('notifikasi.index') }}">Lihat Semua Notifikasi</a>
+                        </li>
                     </ul>
-                </div>
+                </li>
 
                 <div class="dropdown">
                     <a href="#" class="d-flex align-items-center text-decoration-none dropdown-toggle text-dark" data-bs-toggle="dropdown">
@@ -310,6 +326,20 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src='https://cdn.jsdelivr.net/npm/fullcalendar@6.1.8/index.global.min.js'></script>
+    
+    <!-- Script AJAX untuk menandai notifikasi sudah dibaca saat diklik -->
+    <script>
+    function markAsRead(notifId) {
+        fetch(`/notifikasi/${notifId}/read`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]').content
+            }
+        });
+    }
+    </script>
+
     @stack('scripts')
 </body>
 </html>

@@ -35,6 +35,8 @@
                             <th>Tanggal</th>
                             <th>Lokasi / Tempat</th>
                             <th>Pengaju</th>
+                            <!-- ✅ KOLOM AKSI DITAMBAHKAN DI SINI -->
+                            <th class="text-center" style="width: 120px;">Aksi</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -66,10 +68,42 @@
                                 <div class="fw-semibold">{{ $creatorName }}</div>
                                 <small class="text-muted">NIP: {{ $creatorNip }}</small>
                             </td>
+                            
+                            <!-- ✅ LOGIKA TOMBOL EDIT & HAPUS (HANYA UNTUK PEMBUAT) -->
+                            <td class="text-center">
+                                @php
+                                    $userNip = (string) auth()->user()->nip;
+                                    // Cek apakah NIP yang login sama persis dengan pembuat agenda
+                                    $isCreator = ($agenda->created_by === $userNip);
+                                    
+                                    // Opsional: Hanya izinkan edit/hapus jika status masih 'submitted' (belum diproses sekretariat)
+                                    // Jika ingin bisa edit/hapus kapan saja selama dia pembuat, hapus kondisi '&& $agenda->status === 'submitted''
+                                    $canManage = $isCreator && $agenda->status === 'submitted';
+                                @endphp
+
+                                @if($canManage)
+                                    <!-- event.stopPropagation() MENCEGAH baris berpindah ke halaman detail saat tombol diklik -->
+                                    <div class="d-flex justify-content-center gap-2" onclick="event.stopPropagation();">
+                                        <a href="{{ route('agenda.edit', $agenda->id) }}" class="btn btn-sm btn-warning" title="Edit Agenda">
+                                            <i class="bi bi-pencil-square"></i>
+                                        </a>
+                                        <form action="{{ route('agenda.destroy', $agenda->id) }}" method="POST" onsubmit="return confirm('Yakin ingin menghapus agenda ini? Tindakan ini tidak dapat dibatalkan.'); event.stopPropagation();">
+                                            @csrf
+                                            @method('DELETE')
+                                            <button type="submit" class="btn btn-sm btn-danger" title="Hapus Agenda">
+                                                <i class="bi bi-trash"></i>
+                                            </button>
+                                        </form>
+                                    </div>
+                                @else
+                                    <span class="text-muted small">-</span>
+                                @endif
+                            </td>
+                            <!-- ✅ AKHIR LOGIKA TOMBOL -->
                         </tr>
                         @empty
                         <tr>
-                            <td colspan="5" class="text-center py-5 text-muted">
+                            <td colspan="6" class="text-center py-5 text-muted">
                                 <i class="bi bi-inbox fs-1 d-block mb-2"></i>
                                 Belum ada data agenda.
                             </td>
@@ -99,7 +133,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 center: 'title', 
                 right: 'dayGridMonth,listWeek' 
             },
-            // ✅ PERBAIKAN: Gunakan API route agar data agenda pasti muncul tanpa bergantung pada variabel controller
             events: '{{ route("api.kalender-agenda") }}',
             height: 'auto',
             firstDay: 1,

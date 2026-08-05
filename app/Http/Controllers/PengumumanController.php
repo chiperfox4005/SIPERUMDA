@@ -12,39 +12,68 @@ use Illuminate\Support\Facades\Storage;
 
 class PengumumanController extends Controller
 {
+    /**
+     * Helper Anti-Gagal: Cek apakah user yang login adalah pembuat pengumuman ini
+     * Mengecek semua kemungkinan kolom (ID atau NIP)
+     */
+    private function isCreator($pengumuman)
+    {
+        $user = auth()->user();
+        $userId = (string) $user->id;
+        $userNip = (string) ($user->nip ?? '');
+        
+        // Ambil semua kemungkinan kolom penyimpan ID pembuat dari database
+        $dibuatOleh = (string) ($pengumuman->dibuat_oleh ?? '');
+        $userIdCol = (string) ($pengumuman->user_id ?? '');
+        
+        // Jika ID user ATAU NIP user cocok dengan dibuat_oleh ATAU user_id, maka dia pembuatnya
+        return ($userId === $dibuatOleh) || 
+               ($userNip === $dibuatOleh) || 
+               ($userId === $userIdCol) || 
+               ($userNip === $userIdCol);
+    }
+
     public function index(Request $request)
     {
         $user = auth()->user();
+        $userId = $user->id; 
         $userBagianId = $user->bagian->id ?? null;
         $userSubBagianId = $user->subBagian->id ?? null;
+        $isAdmin = $user->hasRole(['Administrator', 'IT Administrator', 'Sekretariat', 'Kepegawaian']);
         
         $filter = $request->query('filter', 'semua');
+        $query = Pengumuman::query();
 
-        $query = Pengumuman::where('status', 'publish')
-            ->whereDate('tanggal_publish', '<=', now())
-            ->where(function ($q) {
-                $q->whereNull('tanggal_selesai')
-                  ->orWhereDate('tanggal_selesai', '>=', now());
-            })
-            ->where(function ($q) use ($userBagianId, $userSubBagianId) {
-                $q->where('target_audience', 'semua_pegawai')
+        if ($isAdmin) {
+            if ($filter !== 'semua' && !in_array($filter, ['draft', 'aktif', 'expired'])) {
+                $query->where('prioritas', $filter);
+            }
+        } else {
+            $query->where(function ($q) use ($userId, $userBagianId, $userSubBagianId) {
+                $q->where('dibuat_oleh', $userId)
                   ->orWhere(function ($subQ) use ($userBagianId, $userSubBagianId) {
-                      $subQ->where('target_audience', 'bagian_tertentu');
-                      if ($userBagianId) {
-                          $subQ->orWhereJsonContains('target_ids->bagians', (string)$userBagianId);
-                      }
-                      if ($userSubBagianId) {
-                          $subQ->orWhereJsonContains('target_ids->sub_bagians', (string)$userSubBagianId);
-                      }
+                      $subQ->where('status', 'publish')
+                           ->where(function ($targetQ) use ($userBagianId, $userSubBagianId) {
+                               $targetQ->where('target_audience', 'semua_pegawai')
+                                     ->orWhere(function ($specificQ) use ($userBagianId, $userSubBagianId) {
+                                         $specificQ->where('target_audience', 'bagian_tertentu');
+                                         if ($userBagianId) {
+                                             $specificQ->orWhereJsonContains('target_ids->bagians', (string)$userBagianId);
+                                         }
+                                         if ($userSubBagianId) {
+                                             $specificQ->orWhereJsonContains('target_ids->sub_bagians', (string)$userSubBagianId);
+                                         }
+                                     });
+                           });
                   });
             });
 
-        if ($filter !== 'semua') {
-            $query->where('prioritas', $filter); 
+            if ($filter !== 'semua' && !in_array($filter, ['draft', 'aktif', 'expired'])) {
+                $query->where('prioritas', $filter);
+            }
         }
 
         $pengumumans = $query->orderBy('created_at', 'desc')->paginate(10);
-
         return view('pengumuman.index', compact('pengumumans', 'filter'));
     }
 
@@ -52,18 +81,15 @@ class PengumumanController extends Controller
     {
         $bagians = Bagian::withCount('users')->with('subBagians')->get();
         $jenisOptions = ConfigService::get('pengumuman', 'jenis');
-        
         $prioritasOptions = [
             ['id' => 'umum', 'nama' => 'Umum', 'warna' => 'secondary'],
             ['id' => 'penting', 'nama' => 'Penting', 'warna' => 'warning'],
             ['id' => 'mendesak', 'nama' => 'Mendesak', 'warna' => 'danger']
         ];
-        
         $statusOptions = [
             ['id' => 'draft', 'nama' => 'Draft'],
             ['id' => 'publish', 'nama' => 'Publish']
         ];
-
         return view('pengumuman.create', compact('bagians', 'jenisOptions', 'prioritasOptions', 'statusOptions'));
     }
 
@@ -94,9 +120,7 @@ class PengumumanController extends Controller
         $validated['tanggal_publish'] = $request->input('tanggal_publish') ?? $validated['tanggal_mulai'] ?? now();
         $validated['tanggal_berakhir'] = $request->input('tanggal_berakhir') ?? ($validated['tanggal_selesai'] ?? null);
 
-        $bagianIds = [];
-        $subBagianIds = [];
-
+        $bagianIds = []; $subBagianIds = [];
         if ($request->has('target_ids') && is_array($request->target_ids)) {
             foreach ($request->target_ids as $targetId) {
                 if (str_starts_with($targetId, 'bagian_')) {
@@ -112,25 +136,21 @@ class PengumumanController extends Controller
 
         $pengumuman = Pengumuman::create($validated);
 
-        // KIRIM NOTIFIKASI HANYA JIKA STATUS PUBLISH
         if ($pengumuman->status === 'publish') {
-            if ($pengumuman->target_audience === 'semua_pegawai') {
-                $usersToNotify = User::where('id', '!=', auth()->user()->id)->get();
-            } else {
-                $usersToNotify = User::where(function($q) use ($bagianIds, $subBagianIds) {
-                    if (!empty($bagianIds)) {
-                        $q->orWhereIn('bagian_id', $bagianIds);
-                    }
-                    if (!empty($subBagianIds)) {
-                        $q->orWhereIn('sub_bagian_id', $subBagianIds);
-                    }
-                })->where('id', '!=', auth()->user()->id)->get();
+            $query = User::query();
+            
+            if ($pengumuman->target_audience === 'bagian_tertentu') {
+                $query->where(function($q) use ($bagianIds, $subBagianIds) {
+                    if (!empty($bagianIds)) $q->orWhereIn('bagian_id', $bagianIds);
+                    if (!empty($subBagianIds)) $q->orWhereIn('sub_bagian_id', $subBagianIds);
+                });
             }
-
+            
+            $usersToNotify = $query->get();
             foreach ($usersToNotify as $userItem) {
                 $userItem->notify(new PengumumanNotification(
                     $pengumuman, 
-                    'Pengumuman baru telah dipublikasikan: ' . $pengumuman->judul
+                    'Pengumuman baru diterbitkan: ' . $pengumuman->judul
                 ));
             }
         }
@@ -138,18 +158,15 @@ class PengumumanController extends Controller
         return redirect()->route('pengumuman.index')->with('success', 'Pengumuman berhasil dibuat.');
     }
 
-    public function show(Pengumuman $pengumuman)
-    {
-        return view('pengumuman.show', compact('pengumuman'));
+    public function show(Pengumuman $pengumuman) 
+    { 
+        return view('pengumuman.show', compact('pengumuman')); 
     }
 
     public function edit(Pengumuman $pengumuman)
     {
-        abort_unless(
-            auth()->user()->id == $pengumuman->dibuat_oleh || 
-            auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 
-            403
-        );
+        // HANYA PEMBUAT YANG BOLEH AKSES
+        abort_unless($this->isCreator($pengumuman), 403, 'Anda tidak memiliki izin untuk mengedit pengumuman orang lain.');
         
         $bagians = Bagian::withCount('users')->with('subBagians')->get();
         $jenisOptions = ConfigService::get('pengumuman', 'jenis');
@@ -168,11 +185,7 @@ class PengumumanController extends Controller
 
     public function update(Request $request, Pengumuman $pengumuman)
     {
-        abort_unless(
-            auth()->user()->id == $pengumuman->dibuat_oleh || 
-            auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 
-            403
-        );
+        abort_unless($this->isCreator($pengumuman), 403, 'Anda tidak memiliki izin untuk memperbarui pengumuman orang lain.');
         
         $allowedJenis = implode(',', collect(ConfigService::get('pengumuman', 'jenis'))->pluck('id')->toArray());
         $allowedPrioritas = 'umum,penting,mendesak';
@@ -192,9 +205,7 @@ class PengumumanController extends Controller
         ]);
 
         if ($request->hasFile('lampiran')) {
-            if ($pengumuman->lampiran) {
-                Storage::disk('public')->delete($pengumuman->lampiran);
-            }
+            if ($pengumuman->lampiran) Storage::disk('public')->delete($pengumuman->lampiran);
             $validated['lampiran'] = $request->file('lampiran')->store('pengumuman', 'public');
         }
 
@@ -202,14 +213,10 @@ class PengumumanController extends Controller
         $validated['tanggal_berakhir'] = $request->input('tanggal_berakhir') ?? ($validated['tanggal_selesai'] ?? $pengumuman->tanggal_berakhir ?? null);
 
         if ($request->has('target_ids') && is_array($request->target_ids)) {
-            $bagianIds = [];
-            $subBagianIds = [];
+            $bagianIds = []; $subBagianIds = [];
             foreach ($request->target_ids as $targetId) {
-                if (str_starts_with($targetId, 'bagian_')) {
-                    $bagianIds[] = (int) str_replace('bagian_', '', $targetId);
-                } elseif (str_starts_with($targetId, 'sub_')) {
-                    $subBagianIds[] = (int) str_replace('sub_', '', $targetId);
-                }
+                if (str_starts_with($targetId, 'bagian_')) $bagianIds[] = (int) str_replace('bagian_', '', $targetId);
+                elseif (str_starts_with($targetId, 'sub_')) $subBagianIds[] = (int) str_replace('sub_', '', $targetId);
             }
             $validated['target_ids'] = json_encode(['bagians' => $bagianIds, 'sub_bagians' => $subBagianIds]);
         } else {
@@ -220,13 +227,18 @@ class PengumumanController extends Controller
         return redirect()->route('pengumuman.index')->with('success', 'Pengumuman berhasil diperbarui.');
     }
 
+    public function updateStatus(Request $request, Pengumuman $pengumuman) 
+    {
+        abort_unless($this->isCreator($pengumuman), 403, 'Anda tidak memiliki izin untuk mengubah status pengumuman orang lain.');
+        
+        $request->validate(['status' => 'required|in:draft,publish,expired']);
+        $pengumuman->update(['status' => $request->status]);
+        return back()->with('success', 'Status pengumuman berhasil diubah.');
+    }
+
     public function destroy(Pengumuman $pengumuman)
     {
-        abort_unless(
-            auth()->user()->id == $pengumuman->dibuat_oleh || 
-            auth()->user()->hasRole(['Sekretariat', 'IT Administrator', 'Administrator']), 
-            403
-        );
+        abort_unless($this->isCreator($pengumuman), 403, 'Anda tidak memiliki izin untuk menghapus pengumuman orang lain.');
         
         if ($pengumuman->lampiran) {
             Storage::disk('public')->delete($pengumuman->lampiran);

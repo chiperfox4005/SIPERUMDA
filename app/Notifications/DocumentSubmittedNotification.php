@@ -18,17 +18,16 @@ class DocumentSubmittedNotification extends Notification
 
     public function via($notifiable)
     {
-        // Kirim ke database notifikasi Laravel
         return ['database'];
     }
 
     public function toDatabase($notifiable)
     {
         return [
-            'type' => 'surat', // Agar cocok dengan penghitung notifikasi di app.blade.php ($countSurat)
+            'type' => 'surat',
             'title' => 'Pengajuan Surat Baru',
             'message' => ($this->submission->creator->nama_lengkap ?? 'Pegawai') . ' mengajukan permohonan surat "' . ($this->submission->template->name ?? 'Surat') . '". Silakan segera verifikasi.',
-            'url' => route('surat.approval'), // Langsung arahkan ke halaman verifikasi
+            'url' => route('surat.approval'),
             'icon' => 'bi bi-file-earmark-plus text-primary'
         ];
     }
